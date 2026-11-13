@@ -1,4 +1,4 @@
-# Tender
+# Pocky
 
 **A Stellar wallet where your balance earns while it sits, and still pays anyone, in any asset, in one transaction.**
 

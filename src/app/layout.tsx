@@ -3,7 +3,7 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Tender",
+  title: "Pocky",
   description:
     "A Stellar wallet where your balance earns while it sits and still pays anyone, in any asset, in one transaction.",
 };
@@ -44,7 +44,7 @@ export default function RootLayout({
               href="/"
               style={{ fontWeight: 700, letterSpacing: "-0.02em", fontSize: 17 }}
             >
-              Tender
+              Pocky
             </Link>
             <nav style={{ display: "flex", gap: 4 }}>
               {NAV.map((n) => (
@@ -84,7 +84,7 @@ export default function RootLayout({
             lineHeight: 1.6,
           }}
         >
-          Tender reads live Stellar mainnet data through Horizon. It holds no
+          Pocky reads live Stellar mainnet data through Horizon. It holds no
           keys and signs no transactions. Quotes come from Horizon&apos;s
           strict-receive path finder, the read side of the same operation a real
           payment would use.
