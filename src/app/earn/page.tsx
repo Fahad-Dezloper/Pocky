@@ -4,6 +4,11 @@ import { compact, pct } from "@/lib/format";
 
 export const revalidate = 300;
 
+/** Minimum resting bid depth, in USDC, before instant spend is honest. */
+const INSTANT_MIN = 1000;
+/** Below this, a book has dust rather than a market. */
+const DUST = 1;
+
 export default async function EarnPage() {
   const rows = await Promise.all(
     YIELD_ASSETS.map(async (a) => {
@@ -18,7 +23,9 @@ export default async function EarnPage() {
   const sorted = rows.sort(
     (x, y) => (y.depth?.bidDepth ?? 0) - (x.depth?.bidDepth ?? 0),
   );
-  const spendable = sorted.filter((r) => (r.depth?.bidDepth ?? 0) >= 1000);
+  const spendable = sorted.filter(
+    (r) => (r.depth?.bidDepth ?? 0) >= INSTANT_MIN,
+  );
 
   return (
     <div style={{ display: "grid", gap: 24 }}>
@@ -76,7 +83,8 @@ export default async function EarnPage() {
             <tbody>
               {sorted.map(({ asset, depth, stats, trust }) => {
                 const bd = depth?.bidDepth ?? 0;
-                const ok = bd >= 1000;
+                const ok = bd >= INSTANT_MIN;
+                const hasMarket = bd >= DUST;
                 return (
                   <tr key={asset.code}>
                     <td>
@@ -108,7 +116,7 @@ export default async function EarnPage() {
                         fontWeight: 600,
                       }}
                     >
-                      {bd > 0 ? compact(bd) : "none"}
+                      {hasMarket ? compact(bd) : "none"}
                     </td>
                     <td className="r num" style={{ color: "var(--muted)" }}>
                       {depth ? `${depth.bidCount} / ${depth.askCount}` : "n/a"}
@@ -119,7 +127,7 @@ export default async function EarnPage() {
                     <td className="r">
                       {ok ? (
                         <span className="chip chip-ok">yes</span>
-                      ) : bd > 0 ? (
+                      ) : hasMarket ? (
                         <span className="chip chip-warn">small size only</span>
                       ) : (
                         <span className="chip chip-bad">hold only</span>

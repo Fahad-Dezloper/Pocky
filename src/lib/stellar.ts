@@ -6,13 +6,38 @@ export const HORIZON =
 /** XLM has no issuer; Horizon encodes it as a "native" asset. */
 export const NATIVE = "native" as const;
 
+/**
+ * Horizon's hard cap on `source_assets` for the path finder, discovered by
+ * hitting it: "list of assets exceeds maximum length of 15".
+ */
+export const MAX_SOURCE_ASSETS = 15;
+
+export class HorizonError extends Error {
+  constructor(
+    readonly status: number,
+    readonly path: string,
+    /** Horizon's own `extras.reason`, when it supplies one. */
+    readonly reason?: string,
+  ) {
+    super(reason ?? `Horizon ${status} on ${path}`);
+    this.name = "HorizonError";
+  }
+}
+
 async function horizon<T>(path: string, revalidate = 30): Promise<T> {
   const res = await fetch(`${HORIZON}${path}`, {
     headers: { Accept: "application/json" },
     next: { revalidate },
   });
   if (!res.ok) {
-    throw new Error(`Horizon ${res.status} on ${path}`);
+    let reason: string | undefined;
+    try {
+      const body = (await res.json()) as { extras?: { reason?: string } };
+      reason = body.extras?.reason;
+    } catch {
+      // Horizon did not return JSON; fall back to the status line.
+    }
+    throw new HorizonError(res.status, path, reason);
   }
   return res.json() as Promise<T>;
 }
@@ -90,13 +115,44 @@ export async function getStrictReceiveQuotes(
       }[];
     };
   };
-  const qs = [
-    `source_account=${address}`,
+  const destQs = [
     assetParams("destination", destination),
     `destination_amount=${destinationAmount}`,
   ].join("&");
 
-  const data = await horizon<Raw>(`/paths/strict-receive?${qs}`, 5);
+  let data: Raw;
+  try {
+    data = await horizon<Raw>(
+      `/paths/strict-receive?source_account=${address}&${destQs}`,
+      5,
+    );
+  } catch (err) {
+    // Horizon refuses `source_account` for accounts with many trustlines.
+    // The documented alternative is an explicit `source_assets` list, so we
+    // read the balances ourselves and ask again. Same answer, more requests.
+    const tooManyTrustlines =
+      err instanceof HorizonError &&
+      err.status === 400 &&
+      /trustlines/i.test(err.reason ?? "");
+    if (!tooManyTrustlines) throw err;
+
+    const balances = await getBalances(address);
+    const sourceAssets = balances
+      .filter((b) => b.balance > 0 && !b.unauthorised)
+      // Horizon rejects more than 15 source assets, so send the largest
+      // holdings first and accept that very long tails are not quoted.
+      .sort((a, b) => b.balance - a.balance)
+      .slice(0, MAX_SOURCE_ASSETS)
+      .map((b) => (b.code === "XLM" ? "native" : `${b.code}:${b.issuer}`))
+      .join(",");
+
+    if (!sourceAssets) return [];
+    data = await horizon<Raw>(
+      `/paths/strict-receive?source_assets=${encodeURIComponent(sourceAssets)}&${destQs}`,
+      5,
+    );
+  }
+
   return data._embedded.records.map((r) => ({
     destinationAmount: Number(r.destination_amount),
     sourceAmount: Number(r.source_amount),

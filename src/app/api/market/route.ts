@@ -4,6 +4,11 @@ import { USDC, YIELD_ASSETS, assetId } from "@/lib/assets";
 
 export const revalidate = 60;
 
+/** Minimum resting bid depth, in USDC, before instant spend is honest. */
+const INSTANT_MIN = 1000;
+/** Below this, a book has dust rather than a market. */
+const DUST = 1;
+
 /**
  * Measured liquidity for every yield-bearing asset in the registry.
  * Used to decide, per asset, whether instant spend is honest.
@@ -28,7 +33,9 @@ export async function GET() {
         askCount: depth?.askCount ?? 0,
         spread: depth?.spread ?? null,
         /** Instant spend is only offered where the book can absorb it. */
-        instantSpendable: (depth?.bidDepth ?? 0) >= 1000,
+        instantSpendable: (depth?.bidDepth ?? 0) >= INSTANT_MIN,
+        /** Below DUST there is no market at all, only stray orders. */
+        hasMarket: (depth?.bidDepth ?? 0) >= DUST,
       };
     }),
   );
