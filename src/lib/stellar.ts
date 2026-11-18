@@ -246,43 +246,126 @@ export async function getAssetStats(a: AssetDef): Promise<AssetStats> {
   };
 }
 
-/**
- * Confirm an issuer is vouched for by the domain it claims.
- *
- * Fetches `https://<homeDomain>/.well-known/stellar.toml` and checks the
- * issuing key appears under a matching `[[CURRENCIES]]` entry. An asset that
- * fails this is an impostor regardless of how legitimate its code looks.
- */
-export async function verifyIssuer(a: AssetDef): Promise<{
+export interface Provenance {
+  /** True only when BOTH directions of the SEP-32 check pass. */
   verified: boolean;
+  /** Domain's stellar.toml lists this code from this issuer. */
+  forward: boolean;
+  /** Issuer account's on-chain home_domain points back to that domain. */
+  reverse: boolean;
+  /** The issuer's actual home_domain, when it has one. */
+  homeDomain?: string;
+  /** Issuer's self-declared `[[CURRENCIES]].status`: live / dead / test / private. */
+  declaredStatus?: string;
   reason: string;
-}> {
+}
+
+/**
+ * Bidirectional issuer provenance, per SEP-32.
+ *
+ * Resolving an issuer from a domain's `stellar.toml` alone is NOT sufficient.
+ * SEP-1 says so itself: "Any website can publish Stellar network information."
+ * Anyone can list anyone else's issuing key under their own `[[CURRENCIES]]`.
+ *
+ * SEP-32 (Draft, 2020) states the gap exactly: "the home domain field of an
+ * issuer address does not provide confidence that the domain is related to the
+ * issuer of the asset because any Stellar account holder can set any domain as
+ * their home domain." Its fix is to check both directions and fail closed:
+ *
+ *   forward  domain -> stellar.toml -> [[CURRENCIES]].issuer
+ *   reverse  issuer account -> home_domain -> same domain
+ *
+ * We fail closed on mismatch, on a missing home_domain, and on a duplicate
+ * asset code within one TOML, exactly as SEP-32 prescribes. SEP-32 lists
+ * "Implementations: None at this time", so this is an open standard nobody
+ * had picked up.
+ *
+ * Honest limit: both legs reduce to DNS, TLS and web-server control. This is
+ * domain-grade provenance, not cryptographic provenance.
+ */
+export async function verifyIssuer(a: AssetDef): Promise<Provenance> {
+  const fail = (reason: string, extra: Partial<Provenance> = {}): Provenance => ({
+    verified: false,
+    forward: false,
+    reverse: false,
+    reason,
+    ...extra,
+  });
+
+  let toml: string;
   try {
     const res = await fetch(`https://${a.homeDomain}/.well-known/stellar.toml`, {
       next: { revalidate: 3600 },
     });
-    if (!res.ok) {
-      return { verified: false, reason: `stellar.toml returned ${res.status}` };
-    }
-    const toml = await res.text();
-    const blocks = toml.split(/\[\[CURRENCIES\]\]/).slice(1);
-    for (const block of blocks) {
-      const code = /^\s*code\s*=\s*"([^"]+)"/m.exec(block)?.[1];
-      const issuer = /^\s*issuer\s*=\s*"([^"]+)"/m.exec(block)?.[1];
-      if (code === a.code && issuer === a.issuer) {
-        return { verified: true, reason: `vouched by ${a.homeDomain}` };
-      }
-    }
-    return {
-      verified: false,
-      reason: `${a.homeDomain} does not list ${a.code} from this issuer`,
-    };
+    if (!res.ok) return fail(`stellar.toml returned ${res.status}`);
+    toml = await res.text();
   } catch (err) {
-    return {
-      verified: false,
-      reason: err instanceof Error ? err.message : "lookup failed",
-    };
+    return fail(err instanceof Error ? err.message : "stellar.toml unreachable");
   }
+
+  // --- Forward leg: does the domain vouch for this issuer? ---
+  const blocks = toml.split(/\[\[CURRENCIES\]\]/).slice(1);
+  const matches = blocks.filter((b) => {
+    const code = /^\s*code\s*=\s*"([^"]+)"/m.exec(b)?.[1];
+    const issuer = /^\s*issuer\s*=\s*"([^"]+)"/m.exec(b)?.[1];
+    return code === a.code && issuer === a.issuer;
+  });
+
+  if (matches.length === 0) {
+    return fail(`${a.homeDomain} does not list ${a.code} from this issuer`);
+  }
+  // SEP-32: "If more than one is found, the client fails to resolve."
+  if (matches.length > 1) {
+    return fail(`${a.homeDomain} lists ${a.code} more than once; ambiguous`);
+  }
+
+  const declaredStatus = /^\s*status\s*=\s*"([^"]+)"/m.exec(matches[0])?.[1];
+
+  // --- Reverse leg: does the issuer account point back at the domain? ---
+  let homeDomain: string | undefined;
+  try {
+    const acc = await fetch(`${HORIZON}/accounts/${a.issuer}`, {
+      headers: { Accept: "application/json" },
+      next: { revalidate: 3600 },
+    });
+    if (!acc.ok) {
+      return fail(`issuer account lookup returned ${acc.status}`, {
+        forward: true,
+        declaredStatus,
+      });
+    }
+    homeDomain = ((await acc.json()) as { home_domain?: string }).home_domain;
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : "issuer lookup failed", {
+      forward: true,
+      declaredStatus,
+    });
+  }
+
+  if (!homeDomain) {
+    // SEP-32: "If the issuer address has no home domain reverse resolution fails."
+    return fail(`issuer sets no home_domain; cannot confirm it claims ${a.homeDomain}`, {
+      forward: true,
+      declaredStatus,
+    });
+  }
+  if (homeDomain.toLowerCase() !== a.homeDomain.toLowerCase()) {
+    // SEP-32: "If reverse resolution results in a different domain, resolution fails."
+    return fail(`issuer's home_domain is ${homeDomain}, not ${a.homeDomain}`, {
+      forward: true,
+      homeDomain,
+      declaredStatus,
+    });
+  }
+
+  return {
+    verified: true,
+    forward: true,
+    reverse: true,
+    homeDomain,
+    declaredStatus,
+    reason: `${a.homeDomain} and the issuer account claim each other (SEP-32)`,
+  };
 }
 
 export { assetId };
